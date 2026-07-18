@@ -1,0 +1,7 @@
+transformers
+torch
+chromadb
+Pillow
+numpy
+tqdm
+matplotlib

@@ -1,0 +1,9 @@
+# Downloaded dataset and generated index -- see README.md for how to fetch/rebuild
+data/raw/
+data/chroma/
+data/categories.json
+
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
