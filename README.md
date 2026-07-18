@@ -58,6 +58,7 @@ python -m eval.multi_attribute    # PRD's own "color + type + location" example,
 python -m eval.compositional      # CLIP-only vs hybrid on the "red shirt/blue pants" color-swap case
 python -m eval.ablate_weights     # weight sweep that justified the hybrid-scoring config
 python -m eval.zero_shot_probe    # qualitative probe with words in no vocabulary at all
+python -m eval.corpus_composition # validates the PRD's 3 dataset axes (environment/clothing type/color) are actually covered
 python -m eval.profile_latency    # per-stage query latency, evidence for the scalability claim
 python -m eval.run_eval_queries   # saves labeled contact-sheet PNGs to eval/outputs/
 ```

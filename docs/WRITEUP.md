@@ -5,8 +5,44 @@ retriever entry point `retriever/cli.py`. All numbers below are reproducible
 by running `python -m eval.coverage`, `python -m eval.evaluate`,
 `python -m eval.benchmark`, `python -m eval.ablate_weights`,
 `python -m eval.zero_shot_probe`, `python -m eval.compositional`,
-`python -m eval.test_parser`, `python -m eval.multi_attribute`, and
-`python -m eval.profile_latency`.
+`python -m eval.test_parser`, `python -m eval.multi_attribute`,
+`python -m eval.corpus_composition`, and `python -m eval.profile_latency`.
+
+## 0. Dataset composition — does it actually cover the PRD's 3 axes?
+
+The PRD's dataset section requires variation across three axes: **Environment**
+(office, urban street, park, home), **Clothing Types** (formal, casual,
+outerwear), and **Color Theory** (a wide palette). This was true by
+construction — scene tagging, style tagging, and color extraction all exist
+and are exercised throughout this write-up — but never actually measured and
+reported as evidence until now. `eval/corpus_composition.py` reads the answer
+straight from the index (3,200 images):
+
+**Environment**: all 4 named environments are present, but far from evenly:
+runway (54.8%) and studio (22.6%) dominate; street (11.2%) and park (8.9%)
+are meaningful; **home (0.3%, 9 images) and office (0.2%, 8 images) are
+severely underrepresented**. This is an honest limitation, not a hidden one:
+Fashionpedia is fundamentally a runway/editorial fashion dataset, not a
+general street-style photo corpus, so office/home settings were never going
+to be well represented no matter how good the scene tagger is. It's the
+direct explanation for why PRD eval query #2 ("...inside a modern office")
+scores well: with only 8 true office-tagged images, that query is mostly
+succeeding via the `style=formal` signal (543 images, 17.0%) rather than
+genuinely abundant office-scene matches — worth knowing when judging what
+that P@5=1.00 actually demonstrates.
+
+**Clothing Types**: all 4 named style categories present and reasonably
+balanced (sporty 44.7%, casual 26.1%, formal 17.0%, outerwear 12.2%), plus
+46 distinct Fashionpedia garment/part categories actually observed in the
+corpus (not just theoretically available in the schema).
+
+**Color Theory**: 36 distinct colors extracted and observed in the corpus
+(via the Lab-space classifier — §2.1), from common (charcoal, black, gray —
+unsurprising for runway/editorial photography, which favors black and
+neutral tones) to rare (olive, forest green: 7 instances each; yellow: 13).
+This directly explains §4's finding that no yellow coat exists: yellow is
+the corpus's 3rd-rarest color overall, and the corpus simply doesn't happen
+to combine it with "coat" specifically.
 
 ## 1. Approaches considered
 
