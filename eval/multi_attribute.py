@@ -16,18 +16,16 @@ is doing real work, the 3-attribute query should rank true positives higher
 (or equal) on average -- especially for combos where color+category alone is
 ambiguous (many images share that garment+color across different scenes).
 
+Ground truth is read straight from the already-built index
+(eval/ground_truth.py) rather than recomputed from raw images.
+
 Run: python -m eval.multi_attribute
 """
 import random
 from collections import defaultdict
 
-import chromadb
-from PIL import Image
-
-from common.config import CHROMA_DIR, GARMENT_COLLECTION, IMAGE_COLLECTION
 from eval.benchmark import GARMENT_CATEGORIES
-from indexer.color_extract import extract_colors
-from indexer.dataset import load_dataset
+from eval.ground_truth import ground_truth_triples as _indexed_ground_truth_triples
 from retriever.search import search
 
 MIN_SUPPORT = 2
@@ -43,29 +41,12 @@ SCENE_PHRASES = {
 
 
 def _ground_truth_triples():
-    """(category, color, scene) -> set of file_names."""
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    img_col = client.get_collection(IMAGE_COLLECTION)
-    scene_by_id = {}
-
-    truth = defaultdict(set)
-    for rec in load_dataset():
-        if not rec.instances:
-            continue
-        if rec.image_id not in scene_by_id:
-            meta = img_col.get(ids=[str(rec.image_id)], include=["metadatas"])["metadatas"][0]
-            scene_by_id[rec.image_id] = meta["scene"]
-        scene = scene_by_id[rec.image_id]
-
-        img = Image.open(rec.path).convert("RGB")
-        for inst in rec.instances:
-            if inst.category not in GARMENT_CATEGORIES:
-                continue
-            for color in extract_colors(img, inst.segmentation):
-                if color == "unknown":
-                    continue
-                truth[(inst.category, color, scene)].add(rec.file_name)
-    return truth
+    """(category, color, scene) -> set of file_names, restricted to GARMENT
+    categories (this benchmark is specifically about clothing types, not
+    hardware/embellishment parts -- see eval/benchmark.py)."""
+    all_truth = _indexed_ground_truth_triples(exclude_unknown=True)
+    return {(cat, col, scene): files for (cat, col, scene), files in all_truth.items()
+            if cat in GARMENT_CATEGORIES}
 
 
 def run():

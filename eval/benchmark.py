@@ -23,14 +23,16 @@ assignment actually asks about:
 degenerate polygons) are excluded: they're a labeling artifact, not a query
 anyone would type.
 
+Ground truth is read straight from the already-built index
+(eval/ground_truth.py) rather than recomputed from raw images -- ~0.3s
+instead of several minutes, since indexer/build_index.py already did this
+work once at index time.
+
 Run: python -m eval.benchmark
 """
 from collections import defaultdict
 
-from indexer.color_extract import extract_colors
-from indexer.dataset import load_dataset
-from PIL import Image
-
+from eval.ground_truth import ground_truth_pairs as _indexed_ground_truth_pairs
 from retriever.search import search
 
 MIN_SUPPORT = 3
@@ -47,23 +49,13 @@ GARMENT_CATEGORIES = {
 def ground_truth_pairs():
     """(category, color) -> set of file_names that truly contain that combo.
 
-    An instance can contribute more than one color (see extract_colors --
-    ~25% of garments show real internal color spread), so ground truth must
-    match what's actually indexed: a combo is a true positive if *either*
-    color matches, exactly like the indexed (category, color) pairs used at
-    query time.
+    An instance can contribute more than one color (see
+    indexer/color_extract.py -- ~25% of garments show real internal color
+    spread), so ground truth matches what's actually indexed: a combo is a
+    true positive if *either* color matches, exactly like the indexed
+    (category, color) pairs used at query time.
     """
-    truth = defaultdict(set)
-    for rec in load_dataset():
-        if not rec.instances:
-            continue
-        img = Image.open(rec.path).convert("RGB")
-        for inst in rec.instances:
-            for color in extract_colors(img, inst.segmentation):
-                if color == "unknown":
-                    continue
-                truth[(inst.category, color)].add(rec.file_name)
-    return truth
+    return _indexed_ground_truth_pairs(exclude_unknown=True)
 
 
 def run():

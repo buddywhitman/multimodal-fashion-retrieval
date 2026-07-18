@@ -3,28 +3,21 @@ query's exact attribute combination — the honest ceiling check.
 
 A retrieval system cannot return an image that doesn't exist. Before scoring
 Precision@k, this tells you whether a P@k < 1.0 means "the retriever is
-wrong" or "no such image is in this 1158-image corpus" — the difference
-matters when deciding whether to keep tuning the algorithm or accept the
-dataset's limit.
+wrong" or "no such image is in this corpus" — the difference matters when
+deciding whether to keep tuning the algorithm or accept the dataset's limit.
 
 Run: python -m eval.coverage
 """
 from collections import Counter
 
-from indexer.dataset import load_dataset
-from indexer.color_extract import extract_colors
-from PIL import Image
+from eval.ground_truth import load_indexed_records
 
 
 def build_pair_counts():
     counts = Counter()
-    for rec in load_dataset():
-        if not rec.instances:
-            continue
-        img = Image.open(rec.path).convert("RGB")
-        for inst in rec.instances:
-            for color in extract_colors(img, inst.segmentation):
-                counts[(inst.category, color)] += 1
+    for _image_id, _file_name, pairs, _scene in load_indexed_records():
+        for cat, color in pairs:
+            counts[(cat, color)] += 1
     return counts
 
 

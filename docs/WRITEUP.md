@@ -384,6 +384,25 @@ rather than just being present in the pipeline.
   original 15-55ms) while keeping every bit of the zero-shot/multi-color
   capability — confirmed unchanged on `eval/evaluate.py` (mean P@5 still
   0.600) and `eval/compositional.py` (still 1.000 discrimination accuracy).
+- **Every eval script was recomputing ground truth from raw images on every
+  run, instead of reading what `indexer/build_index.py` already computed and
+  stored.** `benchmark.py`, `coverage.py`, `multi_attribute.py`, and
+  `compositional.py` each independently re-opened every relevant image and
+  re-ran segmentation-mask color extraction from scratch to answer "what
+  `(category, color)` combos actually exist" — work already done once at
+  index time and sitting in Chroma's `pairs` metadata field. Measured
+  directly: the ground-truth build for `benchmark.py` took **385.8s**;
+  reading the same data back from the index took **0.283s** — a **1364x**
+  difference. Fixed by adding `eval/ground_truth.py`, a shared loader that
+  reads directly from the already-built index (one Chroma `.get()` call, no
+  image I/O), and rewiring all four scripts to use it. This isn't just
+  faster — it also removes a class of possible bug, since eval "ground
+  truth" recomputed independently could in principle drift from what's
+  actually indexed if the two code paths ever diverged; reading the same
+  data both places makes that impossible by construction. Verified
+  identical output on every rewired script before/after (e.g. `benchmark.py`
+  GARMENT slice: P@5=0.850, R@5=0.926, unchanged; `compositional.py`:
+  1.000 hybrid discrimination, unchanged).
 
 ## 8. Shortcomings & mitigations already in place
 
@@ -464,10 +483,11 @@ color+type+location example showing location roughly doubles precision
 (§3d); a corpus-grounded 258-query benchmark (not 5 cherry-picked prompts);
 a 120-combo weight ablation; a zero-shot parser with calibrated
 precision/recall (§3b); multi-color garment extraction that measurably
-applies to ~25% of the corpus (§3c); five real bugs caught by building
-actual regression/recall/coverage/latency checks rather than trusting
-first-pass output (§7) — including a 2-3x latency regression that was
-root-caused and fixed to land *below* the original baseline while keeping
-every bit of the added capability; a measured (not asserted) latency
+applies to ~25% of the corpus (§3c); six real bugs/inefficiencies caught by
+building actual regression/recall/coverage/latency checks rather than
+trusting first-pass output (§7) — including a 2-3x query-latency regression
+fixed to land *below* the original baseline, and a 1364x eval-iteration
+speedup from reading ground truth back from the index instead of
+recomputing it from raw images every run; a measured (not asserted) latency
 profile; and an explicit ground-truth coverage check so precision numbers
 mean what they claim to mean.

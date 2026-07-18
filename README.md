@@ -62,6 +62,12 @@ python -m eval.profile_latency    # per-stage query latency, evidence for the sc
 python -m eval.run_eval_queries   # saves labeled contact-sheet PNGs to eval/outputs/
 ```
 
+All ground-truth-dependent scripts above read directly from the built index
+(`eval/ground_truth.py`) instead of recomputing color extraction from raw
+images — measured 1364x faster (385.8s → 0.283s) than the original
+per-script recomputation, so the whole suite now runs in well under a
+minute total instead of tens of minutes.
+
 **Headline numbers** (full detail in `docs/WRITEUP.md`):
 - **Compositionality** (the PRD's core hint), color-swap discrimination "red shirt+blue pants" vs "blue shirt+red pants": CLIP-only **0.65** (near chance) → hybrid **1.00**.
 - **Context Awareness** (the PRD's own "color + type + location" example): adding the location term **roughly doubles precision** (+0.30 P@5, reproduced across two independent runs).
