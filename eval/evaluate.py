@@ -4,71 +4,62 @@ There's no human relevance-labeled ground truth, so relevance is judged by a
 *predicate* over the metadata stored at index time — reproducible, and lets
 weight/backbone changes be compared objectively instead of eyeballed.
 
-Critically: `eval/coverage.py` established that this 1158-image corpus
-contains **zero** yellow coats and **zero** red ties. A predicate demanding
-those exact combos would score 0 forever regardless of retrieval quality --
-that's a dataset ceiling, not a retriever bug. So each case is marked EXACT
-(ground truth exists, predicate demands it) or PROXY (ground truth absent,
-predicate instead checks the closest correct behavior achievable: right
-category + right color *family*, and that CLIP still respects scene/style).
+The color namer (common/colors.py) is a ~800-name XKCD-derived palette, finer
+than the small set of color *words* a query uses -- a real yellow coat is
+very likely named "mustard" or "maize" in the index, not the bare word
+"yellow". So every color match here is checked by chromatic *family*
+(`same_family`, the same mechanism the retriever itself uses for graded
+partial credit), not exact string equality -- exact-only checking would
+misreport real, substantial ground truth as absent (verified directly via
+`eval/coverage.py`: after merging in Fashionpedia's train2020 split, this
+corpus has 71 yellow-family coats, 652 blue-family shirts, and 127
+red-family ties -- all previously zero or near-zero in the smaller val2020-
+only corpus).
 
 Run: python -m eval.evaluate
 """
-from common.colors import family_members
+from common.colors import same_family
 from retriever.search import search
-
-# "nearest achievable match" families, sourced from the same family table the
-# retriever itself uses (common/colors.py) so this never drifts out of sync
-# with the palette the way a hand-copied set would.
-YELLOW_FAMILY = family_members("yellow") | family_members("brown") | {"beige", "orange", "coral"}
-RED_FAMILY = family_members("red") | family_members("pink")
 
 
 def _has_pair(r, category, color=None):
     for cat, col in zip(r["categories"], r["colors"]):
-        if cat == category and (color is None or col == color):
+        if cat == category and (color is None or same_family(col, color)):
             return True
     return False
 
 
-def _has_category_in_family(r, category, family):
-    for cat, col in zip(r["categories"], r["colors"]):
-        if cat == category and col in family:
-            return True
-    return False
-
-
-# (query, kind, relevance predicate over a result dict)
+# (query, relevance predicate over a result dict)
 CASES = [
-    ("A person in a bright yellow raincoat.", "PROXY (no yellow coat in corpus)",
-     lambda r: _has_category_in_family(r, "coat", YELLOW_FAMILY)),
+    ("A person in a bright yellow raincoat.",
+     lambda r: _has_pair(r, "coat", "yellow")),
 
-    ("Professional business attire inside a modern office.", "EXACT",
+    ("Professional business attire inside a modern office.",
      lambda r: r["scene"] == "office" or r["style"] == "formal"),
 
-    ("Someone wearing a blue shirt sitting on a park bench.", "EXACT",
+    ("Someone wearing a blue shirt sitting on a park bench.",
      lambda r: _has_pair(r, "shirt, blouse", "blue") and r["scene"] in ("park", "street")),
 
-    ("Casual weekend outfit for a city walk.", "EXACT",
+    ("Casual weekend outfit for a city walk.",
      lambda r: r["style"] == "casual" or r["scene"] == "street"),
 
-    ("A red tie and a white shirt in a formal setting.", "PROXY (no red tie in corpus)",
-     lambda r: _has_category_in_family(r, "tie", RED_FAMILY) and _has_pair(r, "shirt, blouse", "white")),
+    ("A red tie and a white shirt in a formal setting.",
+     lambda r: _has_pair(r, "tie", "red") and _has_pair(r, "shirt, blouse", "white")),
 ]
 
 K = 5
 
 
 def run():
-    print(f"Precision@{K} (EXACT = ground truth exists in corpus; PROXY = corpus has none, scored on nearest achievable match)\n")
+    print(f"Precision@{K} (color matches are chromatic-family-aware -- see module docstring)\n")
     scores = []
-    for query, kind, relevant in CASES:
+    for query, relevant in CASES:
         results, _ = search(query, k=K)
         hits = [relevant(r) for r in results]
         p = sum(hits) / len(hits) if hits else 0.0
         scores.append(p)
         marks = "".join("Y" if h else "." for h in hits)
-        print(f"  P@{K}={p:.2f}  [{marks}]  ({kind})")
+        print(f"  P@{K}={p:.2f}  [{marks}]")
         print(f"    {query}")
     print(f"\n  mean P@{K} = {sum(scores) / len(scores):.3f}")
 

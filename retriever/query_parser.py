@@ -86,7 +86,26 @@ def tokenize(query: str):
     cat_vocab = set(_load_categories())
 
     tokens = []  # (index, kind, value)
+    consumed = set()
+
+    # Two-word color names first (majority of the XKCD-derived palette is
+    # two words -- "marine blue", "cornflower blue"). Checked before the
+    # single-word pass and greedily consumed, so "marine blue" registers as
+    # one color token, not two spurious ones ("marine" + "blue", both valid
+    # standalone palette entries with *different* reference colors) that
+    # would corrupt garment-color pairing downstream.
+    for i in range(len(words) - 1):
+        phrase = f"{words[i]} {words[i + 1]}"
+        wc = canonical_color(phrase)
+        candidate = wc if wc in PALETTE else phrase
+        if candidate in PALETTE:
+            tokens.append((i, "color", candidate))
+            consumed.add(i)
+            consumed.add(i + 1)
+
     for i, w in enumerate(words):
+        if i in consumed:
+            continue
         wc = canonical_color(w)
         if wc in PALETTE or w in PALETTE:
             tokens.append((i, "color", canonical_color(wc)))
@@ -101,7 +120,7 @@ def tokenize(query: str):
     non_garment_idx = {i for i, w in enumerate(words)
                         if w in SCENE_KEYWORDS or w in STYLE_KEYWORDS
                         or w in WEATHER_KEYWORDS or w in RELATION_KEYWORDS}
-    known = {i for i, _kind, _val in tokens} | non_garment_idx
+    known = {i for i, _kind, _val in tokens} | non_garment_idx | consumed
 
     from retriever.vocab_resolver import find_candidates
     zs_candidates = find_candidates(words, known)
@@ -113,6 +132,7 @@ def finalize(words, tokens, resolved_zs):
     """tokens + resolved_zs (list[(idx, category)] from
     vocab_resolver.classify_candidates) -> the full parsed dict."""
     tokens = list(tokens) + [(idx, "category", cat) for idx, cat in resolved_zs]
+    tokens = sorted(tokens, key=lambda t: t[0])  # word order, not discovery order
 
     # pair each category with the nearest preceding-or-adjacent color word
     garments, used = [], set()
@@ -133,9 +153,23 @@ def finalize(words, tokens, resolved_zs):
     styles = sorted({STYLE_KEYWORDS[w] for w in words if w in STYLE_KEYWORDS})
     weathers = sorted({WEATHER_KEYWORDS[w] for w in words if w in WEATHER_KEYWORDS})
 
+    # Relation: "layered"/"tucked" alone is undirected (just co-occurrence);
+    # "X over Y" / "Y under X" gives real z-order, resolved by word position
+    # -- see indexer/depth_relations.py for how the index verifies direction
+    # rather than just co-occurrence.
     relation = None
-    if any(w in RELATION_KEYWORDS for w in words) and len(garments) >= 2:
-        relation = tuple(sorted((garments[0][0], garments[1][0])))
+    category_tokens = [(idx, val) for idx, kind, val in tokens if kind == "category"]
+    if len(category_tokens) >= 2:
+        (idx_a, cat_a), (idx_b, cat_b) = category_tokens[0], category_tokens[1]
+        if cat_a != cat_b:
+            over_idx = next((i for i, w in enumerate(words) if w == "over"), None)
+            under_idx = next((i for i, w in enumerate(words) if w == "under"), None)
+            if over_idx is not None and idx_a < over_idx < idx_b:
+                relation = {"pair": tuple(sorted((cat_a, cat_b))), "over": cat_a}
+            elif under_idx is not None and idx_a < under_idx < idx_b:
+                relation = {"pair": tuple(sorted((cat_a, cat_b))), "over": cat_b}
+            elif any(w in RELATION_KEYWORDS for w in words):
+                relation = {"pair": tuple(sorted((cat_a, cat_b))), "over": None}
 
     return {"garments": garments, "scenes": scenes, "styles": styles,
             "weathers": weathers, "relation": relation}

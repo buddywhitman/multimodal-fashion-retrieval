@@ -1,5 +1,6 @@
 transformers
 torch
+open_clip_torch  # only needed if CLIP_BACKEND="open_clip" in common/config.py (see indexer/embed.py)
 chromadb
 Pillow
 numpy

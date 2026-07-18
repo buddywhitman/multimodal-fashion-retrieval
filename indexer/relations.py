@@ -1,16 +1,13 @@
 """Spatial/relational attributes between garment instances in the same image.
 
-Scoped honestly: bounding boxes alone don't reliably tell you z-order (is the
-shirt tucked *into* the pants, or is the jacket worn *over* the shirt?) --
-that needs actual depth/occlusion reasoning this project doesn't have. What
-bbox geometry *does* reliably tell you is co-occurrence in the same body
-region: two garments in the same body area (both upperbody, or both
-lowerbody) with substantial bbox overlap are being worn together/layered,
-regardless of which is "on top". So "layered" is the one relation implemented
-here — not a full solve of "tucked in" vs "over", but a real, honestly-scoped
-step past "no spatial reasoning at all", and the same (A, B) pair format
-extends cleanly to a real z-order signal later if one becomes available
-(e.g. from instance depth ordering or occlusion masks).
+Bounding-box overlap alone can tell you two garments in the same body region
+(both upperbody, or both lowerbody) are worn together/layered, but not which
+is "on top" -- that needs actual depth/occlusion reasoning bboxes don't carry.
+extract_layered_pairs() gives the cheap, undirected version (co-occurrence
+only). indexer/depth_relations.py adds real z-order on top, using a monocular
+depth model -- run only on the candidate pairs this module finds, since most
+images have none and full-corpus depth estimation would be needlessly
+expensive (see that module's docstring for the cost tradeoff).
 """
 
 LAYERABLE_SUPERCATEGORIES = {"upperbody", "lowerbody"}
@@ -33,9 +30,13 @@ def _bbox_iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
-def extract_layered_pairs(instances):
-    """list[GarmentInstance] -> list[(category_a, category_b)], sorted, deduped."""
-    pairs = set()
+def extract_layered_instance_pairs(instances):
+    """list[GarmentInstance] -> list[(i, j)] instance-index pairs (i<j) that
+    are candidate layered pairs -- same body region, overlapping bboxes,
+    different categories. Instance-level (not just category names) so a
+    caller can access each instance's segmentation for real z-order via
+    indexer/depth_relations.py."""
+    pairs = []
     for i in range(len(instances)):
         for j in range(i + 1, len(instances)):
             a, b = instances[i], instances[j]
@@ -46,5 +47,14 @@ def extract_layered_pairs(instances):
             if a.category == b.category:
                 continue
             if _bbox_iou(a.bbox, b.bbox) >= IOU_THRESHOLD:
-                pairs.add(tuple(sorted((a.category, b.category))))
+                pairs.append((i, j))
+    return pairs
+
+
+def extract_layered_pairs(instances):
+    """list[GarmentInstance] -> list[(category_a, category_b)], sorted,
+    deduped -- the undirected version, for callers that don't need z-order."""
+    pairs = set()
+    for i, j in extract_layered_instance_pairs(instances):
+        pairs.add(tuple(sorted((instances[i].category, instances[j].category))))
     return sorted(pairs)

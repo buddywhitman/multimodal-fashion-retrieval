@@ -88,16 +88,35 @@ def _exact_match(subq, pairs):
     return best
 
 
-def _relation_match(relation, relations_str):
+def _relation_match(relation, relations_str, relations_directed_str):
+    """relation: {"pair": (catA, catB), "over": cat_or_None} from
+    query_parser.finalize(). Returns a score: 0 no match, 0.6 co-occurrence
+    only (undirected -- the pair layers together, but the query either didn't
+    specify direction or we couldn't verify it), 1.0 confirmed direction
+    (indexer/depth_relations.py's real z-order agrees with the query)."""
     if relation is None:
-        return False
+        return 0.0
+
+    pair_hit = False
     for p in relations_str.split("|"):
         if "::" not in p:
             continue
         a, b = p.split("::", 1)
-        if tuple(sorted((a, b))) == relation:
-            return True
-    return False
+        if tuple(sorted((a, b))) == relation["pair"]:
+            pair_hit = True
+            break
+    if not pair_hit:
+        return 0.0
+    if relation["over"] is None:
+        return 0.6
+
+    for p in relations_directed_str.split("|"):
+        if ">" not in p:
+            continue
+        over, under = p.split(">", 1)
+        if {over, under} == set(relation["pair"]) and over == relation["over"]:
+            return 1.0
+    return 0.6  # co-occurs, but direction unverified or the query's asserted direction doesn't match
 
 
 def search(query: str, k: int = 10):
@@ -188,8 +207,13 @@ def search(query: str, k: int = 10):
         comp_score = 0.0
         if has_comp:
             comp_score = float(np.mean([_exact_match(g, meta["pairs"]) for g in parsed["garments"]]))
-            if relation is not None and _relation_match(relation, meta.get("relations", "")):
-                comp_score = min(1.0, comp_score + 0.2)
+            if relation is not None:
+                rel_score = _relation_match(relation, meta.get("relations", ""),
+                                             meta.get("relations_directed", ""))
+                # 0.6 co-occurs undirected, 1.0 confirmed z-order -- scaled to
+                # a max +0.2 bonus so it sharpens ranking without dominating
+                # the per-garment attribute match this sits on top of
+                comp_score = min(1.0, comp_score + 0.2 * rel_score)
 
         tag_score = 0.0
         if has_tag:

@@ -34,8 +34,9 @@ from common.config import (
 )
 from indexer.color_extract import extract_colors
 from indexer.dataset import category_vocab, load_dataset, load_unannotated_images
+from indexer.depth_relations import estimate_depth, order_pair
 from indexer.embed import embed_images
-from indexer.relations import extract_layered_pairs
+from indexer.relations import extract_layered_instance_pairs
 from indexer.scene_tag import tag_images
 
 BATCH_IMAGES = 32
@@ -108,14 +109,31 @@ def build():
                         "instance_idx": j,
                     })
 
-            relations = extract_layered_pairs(rec.instances)
+            # Layered pairs (bbox overlap, same body region) undirected, plus
+            # real z-order ("worn over") from depth estimation when a
+            # candidate pair exists -- see indexer/depth_relations.py for why
+            # this is only run on images that actually need it, not every image.
+            instance_pairs = extract_layered_instance_pairs(rec.instances)
+            relations, directed = set(), []
+            if instance_pairs:
+                depth = estimate_depth(img)
+                for ii, jj in instance_pairs:
+                    cat_a, cat_b = rec.instances[ii].category, rec.instances[jj].category
+                    relations.add(tuple(sorted((cat_a, cat_b))))
+                    order = order_pair(depth, rec.instances[ii].segmentation, rec.instances[jj].segmentation)
+                    if order is not None:
+                        over_i, under_i = order
+                        over_cat = cat_a if over_i == 0 else cat_b
+                        under_cat = cat_b if over_i == 0 else cat_a
+                        directed.append((over_cat, under_cat))
 
             img_ids.append(str(rec.image_id))
             img_metas.append({
                 "file_name": rec.file_name, "path": rec.path,
                 "categories": "|".join(categories), "colors": "|".join(colors),
                 "pairs": "|".join(f"{c}::{col}" for c, col in zip(categories, colors)),
-                "relations": "|".join(f"{a}::{b}" for a, b in relations),
+                "relations": "|".join(f"{a}::{b}" for a, b in sorted(relations)),
+                "relations_directed": "|".join(f"{over}>{under}" for over, under in directed),
                 "scene": scene, "style": style, "weather": weather,
             })
 
@@ -141,6 +159,7 @@ def build():
             img_metas.append({
                 "file_name": os.path.basename(path), "path": path,
                 "categories": "", "colors": "", "pairs": "", "relations": "",
+                "relations_directed": "",
                 "scene": scene, "style": style, "weather": weather,
             })
         img_col.add(ids=img_ids, embeddings=img_embeddings.tolist(), metadatas=img_metas)

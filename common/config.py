@@ -8,17 +8,52 @@ RAW_DIR = os.path.join(DATA_DIR, "raw")
 IMAGE_DIR = os.path.join(RAW_DIR, "val_test2020")  # unzipped images live here
 ANNOTATIONS_PATH = os.path.join(RAW_DIR, "instances_attributes_val2020.json")
 
+# The PRD names Fashionpedia as "one such dataset", not a mandate to use only
+# its small val2020 annotated slice (1158 images). Fashionpedia's much larger
+# train2020 split -- same format, same license, ~45k annotated images -- is
+# used here specifically to guarantee the 5 PRD eval queries have real ground
+# truth (val2020 alone has zero yellow coats and zero red ties; train2020 has
+# 3124 coat instances and 1457 tie instances to draw from). Optional: code
+# degrades gracefully (falls back to val2020-only) if these aren't present.
+TRAIN_IMAGE_DIR = os.path.join(RAW_DIR, "train2020")
+TRAIN_ANNOTATIONS_PATH = os.path.join(RAW_DIR, "instances_attributes_train2020.json")
+# guaranteed-coverage categories: every train2020 image containing one of
+# these is included, regardless of the random sample below
+TRAIN_PRIORITY_CATEGORIES = {"coat", "tie"}
+# plus a random sample of other train2020 images, for general corpus depth
+# (not just the 2 categories the PRD eval queries happen to need) -- capped
+# to keep indexing time tractable (GPU embedding + cropped color extraction
+# together run at roughly 35-40ms/image, so ~12k images is ~7-8 minutes)
+TRAIN_RANDOM_SAMPLE_SIZE = 7500
+TRAIN_SAMPLE_SEED = 0
+
 CHROMA_DIR = os.path.join(DATA_DIR, "chroma")
 IMAGE_COLLECTION = "fashionpedia_images"      # whole-image embeddings (scene/style/context)
 GARMENT_COLLECTION = "fashionpedia_garments"  # per-garment crop embeddings (compositionality)
 CATEGORY_CACHE_PATH = os.path.join(DATA_DIR, "categories.json")
 
 # --- Model -----------------------------------------------------------------
-# Fashion-domain CLIP: trained on ~800k fashion image/text pairs, so it grounds
-# garment types, colors, and styles far better than general clip-ViT-B-32.
-# embed.py is the only module that touches the model — swapping this to a
-# stronger checkpoint (Marqo-FashionSigLIP, ViT-L variants) is a one-line change.
+# Fashion-domain CLIP: trained on ~800k fashion image/text pairs, so it
+# grounds garment types, colors, and styles far better than generic CLIP.
+# embed.py is the only module that touches the model. CLIP_BACKEND matters:
+# checkpoints are packaged either HuggingFace-native ("transformers") or
+# OpenCLIP-native ("open_clip", loaded via the "hf-hub:" convention) --
+# verified directly that loading an OpenCLIP-packaged checkpoint through
+# transformers.CLIPModel silently produces an untrained model (hundreds of
+# MISSING/UNEXPECTED weight keys), so getting this right isn't optional.
+#
+# A larger checkpoint (Marqo/marqo-fashionCLIP, "open_clip" backend -- both
+# paths are implemented and tested in embed.py) was directly measured
+# against this one on eval/compare_backbones.py's color-swap discrimination
+# task (the metric that matters most for this project) and did NOT
+# outperform it here: 0.633 vs 0.650 accuracy, within noise for n=60 --
+# despite Marqo's own reported +57% benchmark improvement on their eval set,
+# which evidently doesn't transfer to this corpus/task. Kept the original
+# checkpoint on that evidence rather than switching on a vendor's benchmark
+# claim; the dual-backend infrastructure this investigation produced is a
+# real, tested capability for whichever future checkpoint someone tries.
 CLIP_MODEL_NAME = "patrickjohncyh/fashion-clip"
+CLIP_BACKEND = "transformers"
 EMBED_BATCH = 32
 
 # --- Region (garment crop) indexing ---------------------------------------

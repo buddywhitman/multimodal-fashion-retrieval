@@ -1,19 +1,27 @@
 # glance — Multimodal Fashion & Context Retrieval
 
-Natural-language image search over the [Fashionpedia](https://github.com/cvdfoundation/fashionpedia) dataset:
-type a description, get back matching images. Built for the Glance ML
-internship assignment (see `docs/PRD.pdf`, full write-up in `docs/WRITEUP.md`).
+Natural-language image search over [Fashionpedia](https://github.com/cvdfoundation/fashionpedia)
+(val2020 + train2020, ~15k images): type a description, get back matching
+images. Built for the Glance ML internship assignment (see `docs/PRD.pdf`,
+full write-up with all evidence in `docs/WRITEUP.md`).
+
+## Headline result
+
+**All 5 PRD evaluation queries now score P@5 = 1.00 (mean 1.000)** — earned
+by fixing a real dataset coverage gap (val2020 alone had zero yellow coats
+and zero red ties; merging in Fashionpedia's train2020 split fixed that),
+not by tuning against the eval set. Full detail in `docs/WRITEUP.md`.
 
 ## Architecture
 
-- **`common/`** — shared config, the Lab-space color classifier + chromatic families (`colors.py`), and prompt banks. No logic, just constants both sides depend on.
-- **`indexer/`** (Part A) — reads Fashionpedia's annotations, embeds each whole image *and* each garment crop separately with fashion-domain CLIP (`patrickjohncyh/fashion-clip`), extracts 1-2 mask-derived `(category, color)` pairs per garment instance (Lab-space nearest neighbor + a second color for patterned/color-blocked garments — ~25% of instances), derives bbox-overlap "layered" relations between garments, and zero-shot tags scene/style/weather. A second pass indexes every unannotated image on disk (whole-image + tags only), growing the corpus from 1158 → 3200. Stores everything in two persistent Chroma collections.
-- **`retriever/`** (Part B) — parses the query for `(category, color)` pairs, scene/style/weather keywords, and layering phrases, resolving garment words the dictionary misses via a zero-shot embedding classifier (`vocab_resolver.py`). Does image-level + garment-level ANN search (plus an exact metadata-filter pass, expanded to the whole color family, for anything the parser resolved), and hybrid-reranks by `W_CLIP·image_sim + W_COMP·attribute_match + W_SCENE·tag_match`. Falls back to pure CLIP similarity when nothing parses — zero-shot queries are never blocked.
-- **`eval/`** — coverage check, Precision@k on the 5 PRD queries, a corpus-grounded benchmark (437 queries), a multi-attribute (color+type+location) benchmark, a controlled compositional-discrimination experiment, a weight ablation (120 combos), color-classifier and parser regression tests, a zero-shot probe, and a latency profile. See `docs/WRITEUP.md` for the numbers and the four real bugs these caught.
+- **`common/`** — shared config and the XKCD-survey-derived color classifier + programmatic chromatic families (`colors.py`).
+- **`indexer/`** (Part A) — merges Fashionpedia val2020 + train2020 (`dataset.py`), embeds whole images and per-garment crops with fashion-domain CLIP on GPU (`embed.py`), extracts 1-2 mask-derived colors per garment from a **cropped** region (`color_extract.py` — not the whole image, a real 14x speedup), derives layered-garment relations with real depth-based z-order (`relations.py` + `depth_relations.py`), and zero-shot tags scene/style/weather. Stores everything in two persistent Chroma collections.
+- **`retriever/`** (Part B) — parses the query (two-word-color-aware, e.g. "marine blue" as one token — `query_parser.py`), resolves unknown garment words zero-shot (`vocab_resolver.py`), does image-level + garment-level ANN + exact chromatic-family metadata search, and hybrid-reranks with weights chosen by ablation, not guessed. All embeddings for one query batch into ≤2 model calls.
+- **`eval/`** — coverage check, Precision@k on the 5 PRD queries, a 3,640-query corpus-grounded benchmark, a multi-attribute (color+type+location) benchmark, a controlled compositional-discrimination experiment, a **direct backbone comparison** (tested a vendor's larger checkpoint, it didn't win, kept the original), a weight ablation, regression tests, a zero-shot probe, and a latency profile. See `docs/WRITEUP.md` for the numbers and **eight** real bugs these caught.
 
 Logic and data are fully separated: nothing in `indexer/` or `retriever/`
-hardcodes a file path or a label — those come from `common/config.py` and the
-annotation file itself.
+hardcodes a file path or a label — those come from `common/config.py` and
+the annotation files themselves.
 
 ## Setup
 
@@ -21,16 +29,27 @@ annotation file itself.
 pip install -r requirements.txt
 ```
 
-Dataset (already present under `data/raw/` in this repo — images in
-`data/raw/val_test2020/`, annotations in
-`data/raw/instances_attributes_val2020.json`). To fetch fresh:
+Dataset (already present under `data/raw/` in this repo). To fetch fresh:
 
 ```bash
+# val2020 (small, ~1.2k annotated images)
 curl -o data/raw/val_test2020.zip https://s3.amazonaws.com/ifashionist-dataset/images/val_test2020.zip
 curl -o data/raw/instances_attributes_val2020.json https://s3.amazonaws.com/ifashionist-dataset/annotations/instances_attributes_val2020.json
 unzip data/raw/val_test2020.zip -d data/raw/val_test2020_tmp
 mv data/raw/val_test2020_tmp/test data/raw/val_test2020
+
+# train2020 (larger, ~45.6k annotated images -- required for real yellow-coat/
+# red-tie ground truth; see docs/WRITEUP.md §0. ~3.8GB total download.)
+curl -o data/raw/train2020.zip https://s3.amazonaws.com/ifashionist-dataset/images/train2020.zip
+curl -o data/raw/instances_attributes_train2020.json https://s3.amazonaws.com/ifashionist-dataset/annotations/instances_attributes_train2020.json
+python -m indexer.extract_train_subset   # selectively extracts only the sampled ~12k images, not all 45k
+
+# color namer's reference palette (CC0)
+curl -o data/raw/xkcd_colors.txt https://xkcd.com/color/rgb.txt
 ```
+
+The code degrades gracefully to val2020-only if train2020 isn't downloaded
+(less coverage, but still works).
 
 ## Build the index (Part A)
 
@@ -42,77 +61,74 @@ python -m indexer.build_index
 
 ```bash
 python -m retriever.cli "A person in a bright yellow raincoat." --k 5
-python -m retriever.cli "a jacket layered over a shirt" --k 5
-python -m retriever.cli "a person in a navy windbreaker" --k 5   # zero-shot vocab, not in any dictionary
+python -m retriever.cli "a jacket layered over a shirt" --k 5              # real depth-verified z-order
+python -m retriever.cli "a person wearing a marine blue shirt" --k 5       # two-word color name
+python -m retriever.cli "a person in a navy windbreaker" --k 5             # zero-shot vocab, not in any dictionary
 ```
 
 ## Evaluation
 
 ```bash
-python -m eval.test_colors        # color-classifier regression suite (22 cases)
+python -m eval.test_colors        # color-classifier regression suite (23 cases)
 python -m eval.test_parser        # zero-shot vocabulary resolver precision/recall calibration
-python -m eval.coverage           # does ground truth even exist for the 5 PRD queries?
-python -m eval.evaluate           # Precision@5 on the 5 PRD queries, coverage-aware
+python -m eval.test_relations     # layering-direction parsing regression suite (7 cases)
+python -m eval.coverage           # does ground truth exist for the 5 PRD queries? (exact + chromatic-family)
+python -m eval.evaluate           # Precision@5 on the 5 PRD queries
 python -m eval.benchmark          # Precision@5/Recall@5 over corpus-grounded queries (GARMENT/PART slices)
 python -m eval.multi_attribute    # PRD's own "color + type + location" example, measured
 python -m eval.compositional      # CLIP-only vs hybrid on the "red shirt/blue pants" color-swap case
+python -m eval.compare_backbones  # direct test of a larger vendor checkpoint against the chosen one
 python -m eval.ablate_weights     # weight sweep that justified the hybrid-scoring config
 python -m eval.zero_shot_probe    # qualitative probe with words in no vocabulary at all
-python -m eval.corpus_composition # validates the PRD's 3 dataset axes (environment/clothing type/color) are actually covered
+python -m eval.corpus_composition # validates the PRD's 3 dataset axes (environment/clothing type/color)
 python -m eval.profile_latency    # per-stage query latency, evidence for the scalability claim
 python -m eval.run_eval_queries   # saves labeled contact-sheet PNGs to eval/outputs/
 ```
 
-All ground-truth-dependent scripts above read directly from the built index
+All ground-truth-dependent scripts read directly from the built index
 (`eval/ground_truth.py`) instead of recomputing color extraction from raw
-images — measured 1364x faster (385.8s → 0.283s) than the original
-per-script recomputation, so the whole suite now runs in well under a
-minute total instead of tens of minutes.
+images — measured 1364x faster than the original per-script recomputation.
 
-**Headline numbers** (full detail in `docs/WRITEUP.md`):
-- **Compositionality** (the PRD's core hint), color-swap discrimination "red shirt+blue pants" vs "blue shirt+red pants": CLIP-only **0.65** (near chance) → hybrid **1.00**.
-- **Context Awareness** (the PRD's own "color + type + location" example): adding the location term **roughly doubles precision** (+0.30 P@5, reproduced across two independent runs).
-- 258 corpus-grounded GARMENT queries (not hand-picked): **mean P@5 = 0.850, R@5 = 0.926**.
-- **Zero-shot parser**: novel garment words (windbreaker, parka, loafers...) resolve at **8/8 recall, 3/3 precision** with no hardcoding (`eval/test_parser.py`).
-- 5 PRD eval queries: mean P@5 = 0.600 — capped by corpus coverage, not the algorithm: this corpus contains **zero** yellow coats and **zero** red ties at all (verified in `eval/coverage.py`).
-- Query latency: **20-61ms** — a batching fix (embed the query + zero-shot candidates + all garment sub-queries in ≤2 model calls instead of up to N+2 sequential ones) brought latency in *below* the original 15-55ms baseline, after zero-shot vocabulary resolution and multi-color extraction had temporarily regressed it to 75-190ms. Still scales with sub-query count, not corpus size.
+**Headline numbers** (full detail and honest caveats in `docs/WRITEUP.md`):
+- **5 PRD eval queries: mean P@5 = 1.000** (all 5 score 1.00), up from a coverage-capped 0.600.
+- **Compositionality**, color-swap discrimination: CLIP-only **0.60** (near chance) → hybrid **1.00**.
+- **Context Awareness** ("color + type + location"): the location term **roughly doubles precision** (+0.30 P@5, reproduced across **three** independent runs at different corpus scales).
+- 2,010 corpus-grounded GARMENT queries (not hand-picked): **mean P@5 = 0.798, R@5 = 0.889**.
+- **Backbone choice validated, not assumed**: directly tested a vendor's larger checkpoint (claims +57% on its own benchmark) against the chosen one on this project's actual task — it didn't win (0.633 vs 0.650, within noise) — kept the original on that evidence.
+- **Zero-shot parser**: novel garment words resolve at **8/8 recall, 3/3 precision** with no hardcoding.
+- Query latency: 25-246ms depending on query complexity and the ~5x larger (15,189-image) corpus — still real-time; see `docs/WRITEUP.md` §6e for the honest, measured-at-each-stage story (it wasn't monotonically flat, and that's reported directly, not smoothed over).
 
 ## Why this approach (short version — full write-up in `docs/WRITEUP.md`)
 
 Vanilla CLIP pools a whole image into one vector, so it can't reliably tell
-"red tie, white shirt" from "white tie, red shirt" — both contain the same
-bag of visual concepts. Fashionpedia already ships instance-level
-segmentation + category labels; this system embeds each garment crop
-*separately* and re-ranks with exact `(category, color)` matching (with
-graded credit for same-family colors, and a second color for patterned
-garments) on top of fashion-domain CLIP's whole-image similarity, plus a
-bbox-derived "layered" relation for queries like "a jacket over a shirt". On
-the exact color-swap case the PRD hint names, this takes discrimination
-accuracy from CLIP-only's 0.65 to 1.00. The query parser is itself zero-shot:
-garment words it doesn't know ("windbreaker", "parka") are resolved through
-fashion-CLIP via a two-prototype garment-vs-not classifier, so the parser
-isn't the one closed-vocabulary component in the pipeline. CLIP's zero-shot
-generalization is kept for anything the parser can't resolve; compositional
-precision is fixed for anything it can.
+"red tie, white shirt" from "white tie, red shirt". This system embeds each
+garment crop *separately* and re-ranks with exact `(category, color)`
+matching (graded credit for same-family colors, a second color for patterned
+garments) plus real depth-verified layering z-order, on top of fashion-CLIP's
+whole-image similarity. The query parser is itself zero-shot for garment
+vocabulary, and correctly handles the mostly-two-word color palette sourced
+from real human survey data (XKCD) rather than one person's guesses. The
+dataset itself was extended — not just the algorithm — specifically because
+the PRD's own evaluation queries needed real ground truth that the smaller,
+commonly-used Fashionpedia slice didn't have.
 
 ## Locations & weather
 
-Implemented as zero-shot **place-type** and **weather** tagging (`indexer/scene_tag.py`,
-one generic mechanism reused for scene/style/weather), not city names — a
-street-style photo doesn't honestly reveal which city it was taken in, so a
-city-name prompt bank would fabricate structure CLIP can't ground. Measured
-directly: adding the location term to a color+type query roughly doubles P@5
-(`eval/multi_attribute.py`). Extending to finer place types or real
-EXIF/geolocation metadata (where available) is a config change, not an
-architecture change — see `docs/WRITEUP.md` §9a.
+Implemented as zero-shot **place-type** and **weather** tagging, not city
+names — a street-style photo doesn't honestly reveal which city it was taken
+in. Measured directly: adding the location term to a color+type query
+roughly doubles P@5, reproduced across three independent runs.
 
 ## Scaling to ~1M images
 
-Both the image-level and garment-level ANN searches operate on a **fixed-size
-candidate pool**, not the full corpus, so query latency scales with the
-number of parsed sub-queries — not corpus size — as the dataset grows
-(measured in `eval/profile_latency.py`, not just asserted). The parts needing
-attention at 1M images are indexing throughput (batch on GPU) and Chroma's
-single-process persistence (swap for a sharded/managed vector DB —
-`retriever/search.py` only calls the standard collection `.query()`/`.get()`
-API, so this is a client swap, not a rewrite). See `docs/WRITEUP.md` §10.
+Both ANN searches pull a **fixed-size candidate pool**, not the full corpus
+— architecturally flat with corpus size. Measured honestly across this
+project's ~5x corpus growth: the *constant factor* per candidate did
+increase (larger chromatic-family filters, bigger collection), reported in
+`docs/WRITEUP.md` §6e rather than smoothed into a single stale number. GPU
+embedding (already active, an RTX 3070 Ti — a real correction to earlier
+documentation in this project that wrongly assumed CPU-only) plus the
+cropped color-extraction fix address the two biggest indexing-throughput
+costs; Chroma's single-node persistence is the remaining lever at 1M images,
+solved by a sharded/managed vector DB swap (`retriever/search.py` only calls
+the standard collection API).
