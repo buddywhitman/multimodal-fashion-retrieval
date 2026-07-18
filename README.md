@@ -93,10 +93,10 @@ images — measured 1364x faster than the original per-script recomputation.
 - **5 PRD eval queries: mean P@5 = 1.000** (all 5 score 1.00), up from a coverage-capped 0.600.
 - **Compositionality**, color-swap discrimination: CLIP-only **0.60** (near chance) → hybrid **1.00**.
 - **Context Awareness** ("color + type + location"): the location term **roughly doubles precision** (+0.30 P@5, reproduced across **three** independent runs at different corpus scales).
-- 2,010 corpus-grounded GARMENT queries (not hand-picked): **mean P@5 = 0.798, R@5 = 0.889**.
+- 2,010 corpus-grounded GARMENT queries (not hand-picked): **mean P@5 = 0.817, R@5 = 0.913** — against a computed metric ceiling of 0.888 (many combos have <5 true positives, capping P@5 mechanically).
 - **Backbone choice validated, not assumed**: directly tested a vendor's larger checkpoint (claims +57% on its own benchmark) against the chosen one on this project's actual task — it didn't win (0.633 vs 0.650, within noise) — kept the original on that evidence.
 - **Zero-shot parser**: novel garment words resolve at **8/8 recall, 3/3 precision** with no hardcoding.
-- Query latency: 25-246ms depending on query complexity and the ~5x larger (15,189-image) corpus — still real-time; see `docs/WRITEUP.md` §6e for the honest, measured-at-each-stage story (it wasn't monotonically flat, and that's reported directly, not smoothed over).
+- Query latency: **~30-34ms median** across all query types (was 25-246ms after the corpus grew ~5x) — a ~7x reduction from profiling the real bottleneck (a Chroma metadata scan) and replacing it with in-memory indexes, plus dropping a fuzzy ANN pass measured to add nothing. See `docs/WRITEUP.md` §6e.
 
 ## Why this approach (short version — full write-up in `docs/WRITEUP.md`)
 
@@ -121,14 +121,12 @@ roughly doubles P@5, reproduced across three independent runs.
 
 ## Scaling to ~1M images
 
-Both ANN searches pull a **fixed-size candidate pool**, not the full corpus
-— architecturally flat with corpus size. Measured honestly across this
-project's ~5x corpus growth: the *constant factor* per candidate did
-increase (larger chromatic-family filters, bigger collection), reported in
-`docs/WRITEUP.md` §6e rather than smoothed into a single stale number. GPU
-embedding (already active, an RTX 3070 Ti — a real correction to earlier
-documentation in this project that wrongly assumed CPU-only) plus the
-cropped color-extraction fix address the two biggest indexing-throughput
-costs; Chroma's single-node persistence is the remaining lever at 1M images,
-solved by a sharded/managed vector DB swap (`retriever/search.py` only calls
-the standard collection API).
+Per-query cost is flat with corpus size: a fixed-size image ANN pool (Chroma
+HNSW) plus in-memory attribute/embedding indexes (`retriever/attribute_index.py`,
+`retriever/image_store.py`) that turn exact recall and candidate scoring into
+dict/numpy lookups. The honest tradeoff is startup memory — trivial at 15k
+images (~6s, tens of MB), but at ~1M you'd stop loading the whole collection
+into the retriever and lean on Chroma's server/sharded mode instead. GPU
+embedding (already active — a correction to earlier docs that wrongly
+assumed CPU-only) plus the cropped color-extraction fix address indexing
+throughput. See `docs/WRITEUP.md` §10 for the full, honest tradeoff analysis.

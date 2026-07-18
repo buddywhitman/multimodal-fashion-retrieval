@@ -46,6 +46,8 @@ from common.config import (
     IMAGE_COLLECTION, W_CLIP, W_COMP, W_SCENE,
 )
 from indexer.embed import embed_text
+from retriever import attribute_index as attr_index
+from retriever import image_store
 from retriever.query_parser import finalize, garment_query_text, tokenize
 from retriever.vocab_resolver import classify_candidates
 
@@ -119,7 +121,7 @@ def _relation_match(relation, relations_str, relations_directed_str):
     return 0.6  # co-occurs, but direction unverified or the query's asserted direction doesn't match
 
 
-def search(query: str, k: int = 10):
+def search(query: str, k: int = 10, fuzzy_garment: bool = False):
     img_col, gar_col = _cols()
 
     # ---- 0. parse, batching the query embedding with any zero-shot
@@ -141,54 +143,46 @@ def search(query: str, k: int = 10):
     for cid, meta, dist in zip(img_res["ids"][0], img_res["metadatas"][0], img_res["distances"][0]):
         candidates[cid] = {"meta": meta, "image_sim": 1.0 - dist}
 
-    # ---- 2. garment-level recall: pull parent images of matching crops ----
-    # Two complementary passes per sub-query:
-    #  (a) EXACT metadata filter on (category, color) — deterministic recall.
-    #      We already have ground-truth attributes from Fashionpedia's
-    #      segmentation masks, so for anything the parser resolved exactly,
-    #      there's no reason to depend on CLIP-crop-embedding similarity
-    #      ranking the right crop highly enough to land in the ANN pool
-    #      (verified failure mode: a torso "shirt, blouse" crop can rank
-    #      below dozens of small "sleeve"/"neckline" crops for the same
-    #      text query, since those crops embed deceptively well against
-    #      short garment-type phrases).
-    #  (b) Fuzzy ANN search on the garment-crop embeddings — recall for
-    #      anything the exact filter doesn't cover: near-color / near-category
-    #      matches, or partial parses (category only, no color).
-    # All sub-query texts are embedded in one batched call up front (not one
-    # call per garment inside the loop) -- see module docstring.
-    garment_texts = [garment_query_text(cat, color) for cat, color in parsed["garments"]]
-    garment_embs = embed_text(garment_texts) if garment_texts else []
-
-    for (cat, color), sub_emb in zip(parsed["garments"], garment_embs):
-        if color is None:
-            where = {"category": cat}
-        else:
-            # pull the whole chromatic family deterministically (not just the
-            # literal label) so recall matches the graded 0.8 partial credit
-            # _exact_match gives family members -- see common/colors.py
-            where = {"$and": [{"category": cat}, {"color": {"$in": sorted(family_members(color))}}]}
-        exact = gar_col.get(where=where, include=["metadatas"])
-        for meta in exact["metadatas"]:
-            cid = str(meta["image_id"])
+    # ---- 2. garment-level recall: pull parent images of matching garments ----
+    #  (a) EXACT recall on (category, color-family) via an in-memory inverted
+    #      index (retriever/attribute_index.py). This is deterministic recall:
+    #      the (category, color) attributes are ground truth from Fashionpedia's
+    #      segmentation masks, so there's no reason to depend on CLIP-crop-
+    #      embedding ranking a small crop highly enough to surface it (verified
+    #      failure mode: a torso "shirt, blouse" crop ranked 142nd of 7800 for
+    #      its own correct text query). The index replaced a ~160ms Chroma
+    #      `$in`-over-~100-family-colors scan with a ~1ms dict lookup (§6e of
+    #      the write-up).
+    #  (b) OPTIONAL fuzzy ANN search on garment-crop embeddings, for recall
+    #      beyond exact family matches. Measured to add negligibly to benchmark
+    #      recall (P@5 0.812 vs 0.810 with/without) because (a) already pulls
+    #      every family true positive, while costing ~120ms/query -- so it's
+    #      off by default and kept only as an escape hatch.
+    for (cat, color) in parsed["garments"]:
+        family = family_members(color) if color is not None else None
+        for cid in attr_index.image_ids_for(cat, family):
             candidates.setdefault(cid, {"meta": None, "image_sim": None})
 
-        gres = gar_col.query(
-            query_embeddings=[sub_emb.tolist()],
-            n_results=min(GARMENT_POOL, gar_col.count()),
-            include=["metadatas"],
-        )
-        for meta in gres["metadatas"][0]:
-            cid = str(meta["image_id"])
-            candidates.setdefault(cid, {"meta": None, "image_sim": None})
+    if fuzzy_garment and parsed["garments"]:
+        garment_texts = [garment_query_text(cat, color) for cat, color in parsed["garments"]]
+        garment_embs = embed_text(garment_texts)
+        for sub_emb in garment_embs:
+            gres = gar_col.query(
+                query_embeddings=[sub_emb.tolist()],
+                n_results=min(GARMENT_POOL, gar_col.count()),
+                include=["metadatas"],
+            )
+            for meta in gres["metadatas"][0]:
+                candidates.setdefault(str(meta["image_id"]), {"meta": None, "image_sim": None})
 
-    # fill missing image metadata/sim for garment-sourced candidates in one get()
-    missing = [cid for cid, c in candidates.items() if c["meta"] is None]
-    if missing:
-        got = img_col.get(ids=missing, include=["metadatas", "embeddings"])
-        for cid, meta, emb in zip(got["ids"], got["metadatas"], got["embeddings"]):
-            candidates[cid]["meta"] = meta
-            candidates[cid]["image_sim"] = float(np.dot(q_emb, np.asarray(emb)))
+    # fill missing image metadata/sim for garment-sourced candidates from the
+    # in-memory image store (retriever/image_store.py) -- replaces a per-query
+    # Chroma get() of ~500 images (metadata + embeddings) with instant dict
+    # lookups + a numpy dot (§6e of the write-up).
+    for cid, c in candidates.items():
+        if c["meta"] is None:
+            c["meta"] = image_store.get_meta(cid)
+            c["image_sim"] = image_store.image_sim(cid, q_emb)
 
     # ---- 3. score ----
     relation = parsed["relation"]

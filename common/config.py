@@ -102,12 +102,19 @@ WEATHER_PROMPTS = {
 # final = W_CLIP*image_sim + W_COMP*compositional + W_SCENE*scene_style_weather_match
 # Weights renormalize over whichever signals a given query actually produces,
 # so a pure-scene query isn't penalized for having no garment terms.
-# Chosen by ablation (eval/ablate_weights.py): comp-heavy outperformed the
-# naive 0.50/0.35/0.15 guess because exact (category, color) matches are
-# ground truth from segmentation masks -- more trustworthy than CLIP's fuzzy
-# similarity once a candidate is already known to have the right garment/color.
-W_CLIP = 0.35
-W_COMP = 0.55
+# Chosen by ablation (eval/ablate_weights.py), re-run on the merged 15k-image
+# corpus. The bigger, more diverse corpus makes CLIP's whole-image similarity
+# noisier relative to the exact (category, color) match (ground truth from
+# segmentation masks), so the optimum shifted further toward W_COMP: a sweep
+# of 0.35→0.10 W_CLIP showed garment P@5 rising 0.785→0.805 and plateauing at
+# W_CLIP=0.20 (no further gain from 0.15 or 0.10). Picked the plateau knee
+# rather than pushing W_CLIP lower, to keep CLIP weight at 2x W_SCENE as a
+# robustness margin for pure-scene queries (where W_COMP zeroes out and the
+# W_CLIP:W_SCENE ratio is all that's left) -- verified pure-scene ranking is
+# unchanged across the whole 0.35→0.10 range. CLIP-heavy (0.70) collapsed to
+# 0.433 on this corpus, confirming the direction.
+W_CLIP = 0.20
+W_COMP = 0.70
 W_SCENE = 0.10
 
 CANDIDATE_POOL = 60      # image-level ANN pool

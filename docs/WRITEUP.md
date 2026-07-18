@@ -103,14 +103,16 @@ unrelated dataset:
    before falling back to single words — §7 describes a real bug this fixes).
    Garment words the dictionary misses are resolved **zero-shot** via
    `vocab_resolver.py`.
-2. `search.py`: image-level CLIP recall, garment-level recall (exact
-   chromatic-family metadata filter + fuzzy ANN, per parsed
-   `(category, color)`), scored as `W_CLIP·image_sim + W_COMP·attribute_overlap
-   + W_SCENE·(scene+style+weather match)`, renormalized over whichever
-   signals the query produced. `attribute_overlap`: 1.0 exact color, 0.8
-   same-family, 0.6 category-only, plus a relation bonus (0.6 co-occurs
-   undirected, 1.0 confirmed z-order). Weights (0.35/0.55/0.10) chosen by
-   ablation, not guessed (§6b).
+2. `search.py`: image-level CLIP recall (Chroma HNSW), garment-level recall
+   via an **in-memory attribute index** (`attribute_index.py`: exact
+   `(category, color-family)` → image_ids, a ~1ms dict lookup replacing a
+   ~160ms collection scan — §6e), and candidate scoring/metadata from an
+   **in-memory image store** (`image_store.py`). Scored as
+   `W_CLIP·image_sim + W_COMP·attribute_overlap + W_SCENE·(scene+style+weather
+   match)`, renormalized over whichever signals the query produced.
+   `attribute_overlap`: 1.0 exact color, 0.8 same-family, 0.6 category-only,
+   plus a relation bonus (0.6 co-occurs undirected, 1.0 confirmed z-order).
+   Weights (0.20/0.70/0.10) chosen by ablation on this corpus, not guessed (§6b).
 3. All text a query needs embedded (main query + zero-shot candidates +
    every garment sub-query) is batched into at most two model calls, not
    one call per piece (§7).
@@ -233,35 +235,50 @@ combination occurring ≥3 times in the corpus:
 
 | Slice | # queries | mean P@5 | mean R@5 |
 |---|---|---|---|
-| **GARMENT** | 2,010 | **0.798** | **0.889** |
-| PART (embellishments — harder, not "clothing types" per the PRD) | 1,630 | 0.796 | 0.874 |
-| ALL | 3,640 | 0.797 | 0.882 |
+| **GARMENT** | 2,010 | **0.817** | **0.913** |
+| PART (embellishments — harder, not "clothing types" per the PRD) | 1,630 | 0.793 | 0.870 |
+| ALL | 3,640 | 0.806 | 0.894 |
 
 Query count grew 258→2,010 across the train2020 merge and the finer XKCD
 palette — both create more distinct, real, well-supported combos to test
-(8x more test coverage than the previous round). P@5 moved down from the
-smaller corpus's 0.850 for the same mechanical reason documented throughout
-this project: finer attributes mean more combos with fewer true positives
-each, lowering the P@5 ceiling even at perfect recall. **A meaningful chunk
-of an initial, much larger drop (to 0.326) was a real bug, not this
-mechanical effect** — see §7's two-word-color-tokenizer entry.
+(8x more test coverage than the previous round). P@5 is meaningfully
+below the smaller corpus's 0.850, but this is **largely mechanical, and the
+gap is now measured, not guessed**: the mean *achievable* P@5 ceiling on
+this benchmark is **0.888** (34% of combos have <5 true positives, so P@5
+caps below 1.0 for them no matter what — a combo with 3 true positives caps
+at 3/5=0.6). Against that 0.888 ceiling, GARMENT P@5=0.817 has closed most
+of the recoverable gap; R@5=0.913 is close to its own ceiling. The remaining
+recoverable headroom (~0.07) was partly closed by the weight re-ablation
+(§6b). **A meaningful chunk of an initial, much larger drop (to 0.326) was a
+real bug, not the mechanical effect** — see §7's two-word-color-tokenizer
+entry.
 
 ### b. Weight ablation
 
 `eval/ablate_weights.py`, 120 random GARMENT combos:
 
-| `(W_CLIP, W_COMP, W_SCENE)` | mean P@5 |
-|---|---|
-| 0.70 / 0.20 / 0.10 (CLIP-heavy) | 0.780 |
-| 0.50 / 0.35 / 0.15 (initial guess) | 0.863 |
-| **0.35 / 0.55 / 0.10 (chosen)** | **0.877** |
-| 0.10 / 0.80 / 0.10 (comp-only) | 0.880 |
+Re-run on the merged 15k-image corpus (the earlier ablation was on the
+smaller 3.2k corpus, where the optimum was 0.35/0.55/0.10):
 
-Comp-heavy wins because exact attribute matches are ground truth from
-segmentation, more trustworthy than CLIP's fuzzy similarity once a candidate
-is already known to match. Chosen config preferred over the marginally
-higher comp-only config for robustness (keeps CLIP contributing to
-tie-breaking).
+| `(W_CLIP, W_COMP, W_SCENE)` | mean P@5 | mean R@5 |
+|---|---|---|
+| 0.70 / 0.20 / 0.10 (CLIP-heavy) | 0.433 | 0.485 |
+| 0.35 / 0.55 / 0.10 (old optimum) | 0.785 | 0.889 |
+| 0.25 / 0.65 / 0.10 | 0.797 | 0.904 |
+| **0.20 / 0.70 / 0.10 (chosen — plateau knee)** | **0.805** | **0.916** |
+| 0.15 / 0.75 / 0.10 | 0.805 | 0.916 |
+| 0.10 / 0.80 / 0.10 (comp-only) | 0.805 | 0.916 |
+
+The bigger, more diverse corpus makes CLIP's whole-image similarity noisier
+relative to the exact `(category, color)` match (ground truth from
+segmentation), so the optimum shifted further toward `W_COMP` — CLIP-heavy
+collapsed from a competitive score to 0.433. Chose the **plateau knee**
+(0.20): it captures the full garment-query gain (identical to comp-only)
+while keeping `W_CLIP` at 2x `W_SCENE` as a robustness margin for pure-scene
+queries, where `W_COMP` zeroes out and the `W_CLIP:W_SCENE` ratio is all
+that's left. Verified directly that pure-scene ranking is unchanged across
+the whole 0.35→0.10 `W_CLIP` range, so this isn't overfitting garment
+queries at the expense of scene queries.
 
 ### c. Zero-shot probe
 
@@ -298,22 +315,44 @@ someone tries.
 `eval/profile_latency.py`, measured honestly at each corpus/capability
 change, not asserted once and left stale:
 
-| Phase | Single garment+color | Two garments | Scene-only |
-|---|---|---|---|
-| Original (3,200 images) | 31ms | 55ms | 16ms |
-| + zero-shot resolver + multi-color (unbatched) | 75-100ms | 150-190ms | 30-75ms |
-| + batching fix | 40ms | 56-61ms | 20-24ms |
-| **+ train2020 merge (15,189 images)** | **124ms** | **246ms** | **25ms** |
+| Phase | Single garment+color | Two garments | Scene-only | Large-family (blue shirt) |
+|---|---|---|---|---|
+| Original (3,200 images) | 31ms | 55ms | 16ms | — |
+| + zero-shot resolver + multi-color (unbatched) | 75-100ms | 150-190ms | 30-75ms | — |
+| + batching fix | 40ms | 56-61ms | 20-24ms | — |
+| + train2020 merge (15,189 images) | 124ms | 246ms | 25ms | 237ms |
+| **+ in-memory indexes + fuzzy-off (final)** | **32ms** | **33ms** | **30ms** | **34ms** |
 
-The batching fix (§ below) held up as designed — latency scales with the
-**number of parsed sub-queries**, not raw model-call count. The renewed
-increase after the train2020 merge is a real, honest measurement at ~5x more
-images/crops: larger chromatic families (up to 100+ members) mean bigger
-`$in` metadata filters, and a larger Chroma collection costs more per ANN
-call even with HNSW's sub-linear scaling. All figures stay well under 300ms
-(comfortably real-time), and the architectural claim in §10 — flat with
-corpus size for a *fixed* candidate pool — still holds; the absolute
-constant just moved once with a 5x larger candidate universe to filter within.
+The train2020 merge (~5x more images/crops) initially pushed latency back up
+to 124-246ms — profiled directly (not assumed) to find the cause: the
+deterministic exact-recall step was a Chroma `$in`-over-~100-family-colors
+filter that **scans the whole 99k-garment collection** (~160ms), and filling
+metadata+embeddings for the ~500 candidate images a high-recall query pulls
+was a per-query Chroma `get` (~52ms). Three fixes, each measured:
+
+1. **In-memory attribute index** (`retriever/attribute_index.py`): build
+   `(category, color) → image_ids` once (paged load, ~4s startup, ~7k keys),
+   turning the exact-recall step into a dict lookup. Measured **~160ms →
+   1.08ms** on that stage (~150x). The scan cost was independent of how the
+   filter was written — a scalar-field match and a Python-side filter both
+   cost the same ~160ms — so the fix had to be architectural, not a query
+   rewrite.
+2. **In-memory image store** (`retriever/image_store.py`): cache all image
+   metadata + embeddings once (~1.7s, 31MB for 15k images), so scoring a
+   garment-sourced candidate is a numpy dot, not a Chroma fetch. Measured
+   **~52ms → sub-ms**.
+3. **Fuzzy garment ANN off by default**: measured to add **nothing** to
+   benchmark recall (P@5 0.812 vs 0.810 with/without, identical top-5)
+   because the exact attribute index already pulls every family true
+   positive — while costing ~120ms/query. Kept as an opt-in escape hatch.
+
+Net: steady-state median dropped to **~30-34ms across all query types** —
+below even the original 3,200-image baseline, at 5x the corpus size. The
+one-time in-memory-index build (~6s total) is the honest tradeoff: trivial at
+15k images and amortized to nothing for a long-running service; at ~1M images
+you'd rely on Chroma's server/sharded mode instead (§10), which is a client
+swap. The dominant remaining per-query cost is now the fashion-CLIP text
+encode itself (~15-20ms), not any database call.
 
 ### f. GPU — already active, previously undocumented
 
@@ -422,15 +461,21 @@ check rather than trusting first-pass output:
 
 ## 10. Scalability to ~1M images
 
-Both ANN searches pull a **fixed-size candidate pool**, not the full corpus
-— architecturally flat with corpus size. What's *not* flat, measured
-honestly in §6e: the constant-factor cost per candidate (larger chromatic
-`$in` filters, bigger Chroma collection) did increase once at the ~5x corpus
-growth in this project. The real bottleneck at 1M images is indexing
-throughput — already GPU-accelerated (§6f) and now that the color-extraction
-bottleneck is fixed too, both major indexing costs are addressed — and
-Chroma's single-node persistence, solved by a sharded/managed vector DB swap
-(`retriever/search.py` only calls the standard collection API).
+Query-side, the image ANN pulls a **fixed-size candidate pool** (Chroma
+HNSW, sub-linear), and the deterministic exact-recall + candidate scoring now
+run against **in-memory indexes** (§6e) — dict/numpy lookups whose *per-query*
+cost is flat regardless of corpus size. The honest tradeoff those in-memory
+indexes make is **startup memory and build time**: at 15k images that's ~6s
+and a few tens of MB (trivial); at 1M images the image-embedding store alone
+would be ~2GB and the build would be minutes, so at that scale you'd stop
+loading the whole collection into the retriever process and instead lean on
+Chroma's server/sharded mode for both the ANN and the metadata filter (the
+`$in`-scan that the in-memory index replaced is exactly the kind of operation
+a proper vector-DB server parallelizes). `retriever/search.py` only calls the
+standard collection API plus these two swappable in-memory helpers, so that's
+a bounded change, not a rewrite. Indexing throughput — the other 1M-image
+bottleneck — is already GPU-accelerated (§6f) with the color-extraction
+bottleneck fixed, so both major indexing costs are addressed.
 
 ## 11. On "state of the art"
 
@@ -441,9 +486,13 @@ a direct test of the PRD's "color+type+location" example (location roughly
 doubles precision, reproduced across **three** independent runs); a direct,
 skeptical test of a vendor's larger-checkpoint benchmark claim that did
 **not** hold up on this task (§6d) — kept the original backbone on that
-evidence; a corpus-grounded 2,010-query benchmark; a 120-combo weight
-ablation; **eight** real bugs found and fixed by building actual checks,
-including one caught specifically by not accepting a benchmark regression at
-face value and instead investigating the specific failing case (§7, #8); and
-the headline result — **all 5 PRD queries now score P@5=1.00** — earned by
-fixing the dataset's real coverage gap, not by tuning against the eval set.
+evidence; a corpus-grounded 2,010-query benchmark measured against its own
+computed ceiling (P@5 0.817 vs. a metric-limited 0.888); a weight ablation
+re-run on the merged corpus (optimum shifted 0.35→0.20 W_CLIP, verified not
+to regress scene queries); a **~7x query-latency reduction** (246ms → ~33ms)
+from profiling the actual bottleneck rather than guessing; **eight** real
+bugs found and fixed by building actual checks, including one caught
+specifically by not accepting a benchmark regression at face value and
+instead investigating the specific failing case (§7, #8); and the headline
+result — **all 5 PRD queries now score P@5=1.00** — earned by fixing the
+dataset's real coverage gap, not by tuning against the eval set.

@@ -167,14 +167,28 @@ def same_family(color_a, color_b):
     return fa != "neutral"
 
 
+# family -> its member color names, computed once (not per call: with ~800
+# names, the naive per-call set comprehension is O(palette) every lookup)
+_MEMBERS_BY_FAMILY = None
+
+
+def _members_by_family():
+    global _MEMBERS_BY_FAMILY
+    if _MEMBERS_BY_FAMILY is None:
+        by_fam = {}
+        for n in _PALETTE_NAMES:
+            by_fam.setdefault(_family_of(n), set()).add(n)
+        _MEMBERS_BY_FAMILY = by_fam
+    return _MEMBERS_BY_FAMILY
+
+
 def family_members(color):
     """All palette colors in the same chromatic family as `color`, including
-    itself. Note: with ~800 names this can be a large set (e.g. dozens of
-    "blue" shades) -- that's intentional, it's exactly the graded-credit
-    scope a query like "a blue shirt" should match."""
+    itself. With ~800 names this can be a large set (e.g. dozens of "blue"
+    shades) -- that's intentional, it's exactly the graded-credit scope a
+    query like "a blue shirt" should match. Neutrals (black/white/gray) are
+    NOT grouped -- those differences are usually the point of the query."""
     target_family = _family_of(color)
-    if target_family is None:
+    if target_family is None or target_family == "neutral":
         return {color}
-    if target_family == "neutral":
-        return {color}  # neutrals (black/white/gray) are NOT grouped -- see below
-    return {n for n in _PALETTE_NAMES if _family_of(n) == target_family}
+    return _members_by_family().get(target_family, {color})
