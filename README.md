@@ -68,7 +68,7 @@ python -m eval.run_eval_queries   # saves labeled contact-sheet PNGs to eval/out
 - 258 corpus-grounded GARMENT queries (not hand-picked): **mean P@5 = 0.850, R@5 = 0.926**.
 - **Zero-shot parser**: novel garment words (windbreaker, parka, loafers...) resolve at **8/8 recall, 3/3 precision** with no hardcoding (`eval/test_parser.py`).
 - 5 PRD eval queries: mean P@5 = 0.600 — capped by corpus coverage, not the algorithm: this corpus contains **zero** yellow coats and **zero** red ties at all (verified in `eval/coverage.py`).
-- Query latency: 75-190ms (grew from an earlier 15-55ms as zero-shot vocabulary resolution and multi-color extraction were added — a real, bounded trade of latency for capability, still comfortably real-time and still scaling with sub-query count, not corpus size).
+- Query latency: **20-61ms** — a batching fix (embed the query + zero-shot candidates + all garment sub-queries in ≤2 model calls instead of up to N+2 sequential ones) brought latency in *below* the original 15-55ms baseline, after zero-shot vocabulary resolution and multi-color extraction had temporarily regressed it to 75-190ms. Still scales with sub-query count, not corpus size.
 
 ## Why this approach (short version — full write-up in `docs/WRITEUP.md`)
 

@@ -301,24 +301,30 @@ corpus, steady-state (post model-load):
 
 | Query | median latency |
 |---|---|
-| Single garment+color term | 75-100ms |
-| Two garment+color terms + style | 150-190ms |
-| Scene/style only, no garment term | 30-75ms |
-| Simple single-attribute | 75-100ms |
+| Single garment+color term | 40ms |
+| Two garment+color terms + style | 56-61ms |
+| Scene/style only, no garment term | 20-24ms |
+| Simple single-attribute | 42-46ms |
 
-Latency roughly tripled over the course of this project (an earlier profile
-showed 15-55ms) as real capability was added: the zero-shot vocabulary
-resolver (§3b) adds one batched embedding call per query when a word doesn't
-match the dictionary, and multi-color extraction (§3c) means more
-`(category, color)` pairs to match per candidate. One genuine inefficiency
-was caught and fixed along the way (§7: the resolver was re-embedding words
-already classified elsewhere, like "office"), which materially helped but
-didn't eliminate the increase — the remainder is an honest, bounded trade of
-latency for capability, not free. All figures stay well under 200ms
+Latency went through three phases across this project, each measured, not
+asserted: an initial **15-55ms** baseline; a **regression to 75-190ms**
+(2-3x) after adding the zero-shot vocabulary resolver and multi-color
+extraction, because each of those made separate small model calls (one per
+zero-shot candidate word, one per garment sub-query) instead of one batched
+call; and a **fix that landed below the original baseline** (20-61ms) by
+batching every text embedding a query needs — the main query, any zero-shot
+candidates, and all garment sub-queries — into at most two model calls total,
+regardless of how many garments are parsed. The batching win itself was
+measured directly before implementing it: 4 sequential single-item embedding
+calls took ~44ms median on this CPU-only backbone; one batched 4-item call
+took ~14ms (~3x) — Python/tokenizer/call overhead dominates at this scale,
+not the matmuls, so fewer/larger calls beats more/smaller ones. Net result:
+all the zero-shot and multi-color capability added in §3b/§3c, at **lower**
+latency than before either existed. All figures stay well under 100ms
 (comfortably real-time for interactive search) and — this is the part that
 matters for §10 — still scale with the **number of parsed sub-queries**, not
-corpus size: every stage is one CLIP text-encode + one fixed-size ANN call +
-one exact filter, regardless of how large the corpus grows.
+corpus size: every stage is a batched CLIP text-encode + fixed-size ANN calls
++ exact filters, regardless of how large the corpus grows.
 
 ### e. Multi-attribute (color + type + location) — see §3d
 
@@ -364,6 +370,20 @@ rather than just being present in the pipeline.
   candidate word list shrank (e.g. a 5-word candidate set down to 2) and
   measurably cut latency, without changing `eval/test_parser.py`'s 8/8
   recall or 3/3 precision.
+- **Text embeddings were scattered across many small sequential model calls
+  instead of one batched call.** After the previous fix, latency was still
+  2-3x the original baseline. Measured the actual cause directly: 4
+  sequential single-item embedding calls took ~44ms median; one batched
+  4-item call with the same texts took ~14ms (~3x faster) — confirming the
+  regression was call overhead, not genuinely more compute. Fixed by
+  splitting `query_parser.parse()` into `tokenize()` (pure string matching)
+  and `finalize()` (assembly), so `search.py` can embed the main query, any
+  zero-shot candidate words, and all garment sub-query texts in at most two
+  batched calls total, instead of up to N+2 sequential ones. Net effect:
+  latency dropped *below* the pre-resolver baseline (20-61ms vs. the
+  original 15-55ms) while keeping every bit of the zero-shot/multi-color
+  capability — confirmed unchanged on `eval/evaluate.py` (mean P@5 still
+  0.600) and `eval/compositional.py` (still 1.000 discrimination accuracy).
 
 ## 8. Shortcomings & mitigations already in place
 
@@ -444,9 +464,10 @@ color+type+location example showing location roughly doubles precision
 (§3d); a corpus-grounded 258-query benchmark (not 5 cherry-picked prompts);
 a 120-combo weight ablation; a zero-shot parser with calibrated
 precision/recall (§3b); multi-color garment extraction that measurably
-applies to ~25% of the corpus (§3c); four real bugs caught by building
-actual regression/recall/coverage checks rather than trusting first-pass
-output (§7); a measured (not asserted) latency profile that also reports
-being honest about latency going up as capability went up; and an explicit
-ground-truth coverage check so precision numbers mean what they claim to
-mean.
+applies to ~25% of the corpus (§3c); five real bugs caught by building
+actual regression/recall/coverage/latency checks rather than trusting
+first-pass output (§7) — including a 2-3x latency regression that was
+root-caused and fixed to land *below* the original baseline while keeping
+every bit of the added capability; a measured (not asserted) latency
+profile; and an explicit ground-truth coverage check so precision numbers
+mean what they claim to mean.

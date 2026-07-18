@@ -25,6 +25,18 @@ Pipeline per query:
 
 If parsing yields nothing, this degrades to pure image similarity — the hybrid
 machinery never blocks a zero-shot query, it only sharpens one it understands.
+
+Text embedding is batched, not scattered across N sequential model calls. A
+query like "a red tie and a white shirt in a formal setting" needs the main
+query embedding, a zero-shot-resolution embedding ("setting"), and two
+garment sub-query embeddings ("a photo of a red tie", "a photo of a white
+shirt") -- four separate CLIP forward passes if done naively. Measured on
+this CPU-only backbone: 4 sequential single-item calls took ~44ms median: one
+batched 4-item call took ~14ms (~3x) -- the per-call Python/tokenizer/model
+overhead dominates at this batch size, not the matmuls. So this module embeds
+the query + any zero-shot candidates together (query_parser.tokenize +
+vocab_resolver.classify_candidates take the embeddings rather than fetching
+their own), and separately batches all garment sub-query texts into one call.
 """
 import numpy as np
 
@@ -34,7 +46,8 @@ from common.config import (
     IMAGE_COLLECTION, W_CLIP, W_COMP, W_SCENE,
 )
 from indexer.embed import embed_text
-from retriever.query_parser import garment_query_text, parse
+from retriever.query_parser import finalize, garment_query_text, tokenize
+from retriever.vocab_resolver import classify_candidates
 
 import chromadb
 
@@ -89,8 +102,15 @@ def _relation_match(relation, relations_str):
 
 def search(query: str, k: int = 10):
     img_col, gar_col = _cols()
-    parsed = parse(query)
-    q_emb = embed_text([query])[0]
+
+    # ---- 0. parse, batching the query embedding with any zero-shot
+    # vocabulary candidates instead of embedding them separately ----
+    words, tokens, zs_candidates = tokenize(query)
+    batch_texts = [query] + [w for _, w in zs_candidates]
+    batch_embs = embed_text(batch_texts)
+    q_emb = batch_embs[0]
+    resolved_zs = classify_candidates(zs_candidates, batch_embs[1:]) if zs_candidates else []
+    parsed = finalize(words, tokens, resolved_zs)
 
     # ---- 1. image-level candidate pool ----
     img_res = img_col.query(
@@ -116,7 +136,12 @@ def search(query: str, k: int = 10):
     #  (b) Fuzzy ANN search on the garment-crop embeddings — recall for
     #      anything the exact filter doesn't cover: near-color / near-category
     #      matches, or partial parses (category only, no color).
-    for (cat, color) in parsed["garments"]:
+    # All sub-query texts are embedded in one batched call up front (not one
+    # call per garment inside the loop) -- see module docstring.
+    garment_texts = [garment_query_text(cat, color) for cat, color in parsed["garments"]]
+    garment_embs = embed_text(garment_texts) if garment_texts else []
+
+    for (cat, color), sub_emb in zip(parsed["garments"], garment_embs):
         if color is None:
             where = {"category": cat}
         else:
@@ -129,7 +154,6 @@ def search(query: str, k: int = 10):
             cid = str(meta["image_id"])
             candidates.setdefault(cid, {"meta": None, "image_sim": None})
 
-        sub_emb = embed_text([garment_query_text(cat, color)])[0]
         gres = gar_col.query(
             query_embeddings=[sub_emb.tolist()],
             n_results=min(GARMENT_POOL, gar_col.count()),

@@ -20,9 +20,12 @@ margin. This cleanly separates real garment words (which are more garment-like
 than place/action/person-like) from filler words (which aren't) — see the
 calibration in eval/test_parser.py.
 
-Kept separate from query_parser so the common fast path (words already in the
-dict) never touches the model; the resolver only loads it on an actual miss,
-and caches all prototype embeddings across calls.
+Split into find_candidates() (pure string matching, no model calls) and
+classify_candidates() (pure vector math given precomputed embeddings) so a
+caller (retriever/search.py) can embed the candidate words in the SAME batched
+model call as everything else it needs that query -- see search.py's docstring
+for why that matters (measured ~3x fewer, larger, batched forward passes vs.
+many small sequential ones on CPU).
 """
 import numpy as np
 
@@ -52,7 +55,9 @@ _cat_emb = None
 _dis_emb = None
 
 
-def _ensure():
+def ensure_prototypes():
+    """Load+cache the category/distractor prototype embeddings. Idempotent --
+    a real model call only on the first-ever invocation in this process."""
     global _cat_names, _cat_emb, _dis_emb
     if _cat_names is None:
         _cat_names = category_vocab()
@@ -60,18 +65,24 @@ def _ensure():
         _dis_emb = embed_text(_DISTRACTORS)
 
 
-def resolve_unknown_garments(words, known_indices):
-    """words: token list. known_indices: positions already matched. Returns
-    list of (index, category) for words that resolve as garments."""
-    candidates = [(i, w) for i, w in enumerate(words)
-                  if i not in known_indices and len(w) >= 4 and w not in _STOPWORDS]
+def find_candidates(words, known_indices):
+    """Pure string filtering, no model calls. Returns list[(index, word)]
+    worth embedding and classifying."""
+    return [(i, w) for i, w in enumerate(words)
+            if i not in known_indices and len(w) >= 4 and w not in _STOPWORDS]
+
+
+def classify_candidates(candidates, embeddings):
+    """candidates: list[(index, word)]; embeddings: precomputed [K, D] array
+    in the same order (the caller embeds these -- typically batched together
+    with other query text, see retriever/search.py). Returns list[(index,
+    category)] for the ones that clear the garment-vs-distractor margin.
+    Pure vector math -- no model call here."""
     if not candidates:
         return []
-
-    _ensure()
-    embs = embed_text([w for _, w in candidates])  # bare words, [K, D]
-    cat_sims = embs @ _cat_emb.T   # [K, C]
-    dis_sims = embs @ _dis_emb.T   # [K, D]
+    ensure_prototypes()
+    cat_sims = embeddings @ _cat_emb.T   # [K, C]
+    dis_sims = embeddings @ _dis_emb.T   # [K, D]
 
     resolved = []
     for crow, drow, (idx, _w) in zip(cat_sims, dis_sims, candidates):
@@ -79,3 +90,14 @@ def resolve_unknown_garments(words, known_indices):
         if float(crow[best]) - float(drow.max()) >= GARMENT_MARGIN:
             resolved.append((idx, _cat_names[best]))
     return resolved
+
+
+def resolve_unknown_garments(words, known_indices):
+    """Convenience one-shot wrapper (embeds candidates itself, one model
+    call). Used by callers that don't need to batch with other text --
+    e.g. query_parser.parse()'s simple/standalone path."""
+    candidates = find_candidates(words, known_indices)
+    if not candidates:
+        return []
+    embeddings = embed_text([w for _, w in candidates])
+    return classify_candidates(candidates, embeddings)

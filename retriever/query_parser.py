@@ -10,6 +10,13 @@ Deliberately a shallow keyword scan, not an LLM call. It only ever *adds*
 re-ranking signal on top of CLIP; when it extracts nothing (a truly novel
 description), the retriever falls back to pure image similarity. So the parser
 can miss without breaking zero-shot — it just stops contributing a boost.
+
+Split into tokenize() (pure string matching, no model calls) + finalize()
+(assembles the parsed dict given already-resolved zero-shot tokens) so
+retriever/search.py can batch the zero-shot-candidate embeddings together with
+everything else it needs to embed that query, instead of parse() making its
+own separate model call. parse() itself is kept as a simple one-call
+convenience wrapper for callers that don't need that (CLI, eval scripts).
 """
 import json
 import re
@@ -70,40 +77,42 @@ def _load_categories():
         return json.load(f)
 
 
-def parse(query: str, zero_shot_vocab: bool = True):
+def tokenize(query: str):
+    """Pure string matching, no model calls. Returns (words, tokens,
+    zs_candidates): tokens is list[(idx, kind, val)] from dict/color/category
+    matches; zs_candidates is list[(idx, word)] worth zero-shot-resolving."""
     text = query.lower()
     words = re.findall(r"[a-z][a-z\-]*", text)
     cat_vocab = set(_load_categories())
 
     tokens = []  # (index, kind, value)
-    matched_idx = set()
     for i, w in enumerate(words):
         wc = canonical_color(w)
         if wc in PALETTE or w in PALETTE:
             tokens.append((i, "color", canonical_color(wc)))
         if w in CATEGORY_SYNONYMS:
             tokens.append((i, "category", CATEGORY_SYNONYMS[w]))
-            matched_idx.add(i)
         elif w in cat_vocab:
             tokens.append((i, "category", w))
-            matched_idx.add(i)
 
-    # any word already classified as scene/style/weather/relation vocabulary
-    # is not a candidate for garment resolution -- computed here (before the
-    # resolver call) specifically so the resolver doesn't waste an embedding
-    # call re-litigating "office" or "layered" as a possible garment.
+    # any word already classified (color/category/scene/style/weather/relation)
+    # is not a candidate for garment resolution -- keeps the resolver from
+    # wasting an embedding call re-litigating "office" or "layered".
     non_garment_idx = {i for i, w in enumerate(words)
                         if w in SCENE_KEYWORDS or w in STYLE_KEYWORDS
                         or w in WEATHER_KEYWORDS or w in RELATION_KEYWORDS}
+    known = {i for i, _kind, _val in tokens} | non_garment_idx
 
-    # zero-shot fallback: resolve garment words the dict missed, by embedding
-    # similarity to known categories (retriever/vocab_resolver.py). Only runs
-    # when there's an unmatched word to resolve, so the common path stays fast.
-    if zero_shot_vocab:
-        from retriever.vocab_resolver import resolve_unknown_garments
-        known = {i for i, _kind, _val in tokens} | non_garment_idx
-        for idx, cat in resolve_unknown_garments(words, known):
-            tokens.append((idx, "category", cat))
+    from retriever.vocab_resolver import find_candidates
+    zs_candidates = find_candidates(words, known)
+
+    return words, tokens, zs_candidates
+
+
+def finalize(words, tokens, resolved_zs):
+    """tokens + resolved_zs (list[(idx, category)] from
+    vocab_resolver.classify_candidates) -> the full parsed dict."""
+    tokens = list(tokens) + [(idx, "category", cat) for idx, cat in resolved_zs]
 
     # pair each category with the nearest preceding-or-adjacent color word
     garments, used = [], set()
@@ -130,6 +139,21 @@ def parse(query: str, zero_shot_vocab: bool = True):
 
     return {"garments": garments, "scenes": scenes, "styles": styles,
             "weathers": weathers, "relation": relation}
+
+
+def parse(query: str, zero_shot_vocab: bool = True):
+    """Simple one-call convenience wrapper: tokenize + resolve + finalize,
+    each zero-shot candidate embedded in its own model call. Fine for
+    standalone use (CLI, eval scripts); retriever/search.py uses tokenize()
+    and finalize() directly so it can batch the embedding call with the rest
+    of what it needs for the query."""
+    words, tokens, zs_candidates = tokenize(query)
+    resolved = []
+    if zero_shot_vocab and zs_candidates:
+        from retriever.vocab_resolver import resolve_unknown_garments
+        known = {i for i, _kind, _val in tokens}
+        resolved = resolve_unknown_garments(words, known)
+    return finalize(words, tokens, resolved)
 
 
 def garment_query_text(category, color):
